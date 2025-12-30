@@ -1,5 +1,6 @@
 import { Icon } from '@/components/common/Icon';
 import { useAppStore, useUIState, usePerformance } from '@/core/state/store';
+import { LogPanel } from './LogPanel';
 
 export function BottomPanel() {
   const { bottomPanelOpen, bottomPanelTab } = useUIState();
@@ -26,6 +27,16 @@ export function BottomPanel() {
           
           {bottomPanelOpen && (
             <div className="flex items-center gap-1">
+              <button
+                onClick={() => setBottomPanelTab('logs')}
+                className={`px-2 py-0.5 rounded text-xs font-medium transition-colors ${
+                  bottomPanelTab === 'logs'
+                    ? 'bg-mosaic-100 text-mosaic-700'
+                    : 'text-surface-600 hover:bg-surface-100'
+                }`}
+              >
+                Logs
+              </button>
               <button
                 onClick={() => setBottomPanelTab('queries')}
                 className={`px-2 py-0.5 rounded text-xs font-medium transition-colors ${
@@ -85,10 +96,11 @@ export function BottomPanel() {
 
       {/* Panel Content */}
       {bottomPanelOpen && (
-        <div className="h-[calc(100%-2rem)] overflow-auto p-3">
-          {bottomPanelTab === 'queries' && <QueriesTab />}
-          {bottomPanelTab === 'data' && <DataTab />}
-          {bottomPanelTab === 'performance' && <PerformanceTab />}
+        <div className="h-[calc(100%-2rem)] overflow-hidden">
+          {bottomPanelTab === 'logs' && <LogPanel />}
+          {bottomPanelTab === 'queries' && <div className="p-3 overflow-auto h-full"><QueriesTab /></div>}
+          {bottomPanelTab === 'data' && <div className="p-3 overflow-auto h-full"><DataTab /></div>}
+          {bottomPanelTab === 'performance' && <div className="p-3 overflow-auto h-full"><PerformanceTab /></div>}
         </div>
       )}
     </div>

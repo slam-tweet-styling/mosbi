@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Icon } from '@/components/common/Icon';
 import { mosaicConnector } from '@/core/mosaic/connector';
 import type { WidgetSpec } from '@/types';
+import { logger, LogCategories } from '@/core/logger';
 
 interface WidgetRendererProps {
   widget: WidgetSpec;
@@ -58,8 +59,17 @@ function ScatterPlotWidget({ widget }: { widget: WidgetSpec }) {
   }, [widget.data.table, widget.visual.x?.field, widget.visual.y?.field]);
 
   const loadData = async () => {
-    if (!mosaicConnector.isInitialized()) return;
+    if (!mosaicConnector.isInitialized()) {
+      logger.warn(LogCategories.Widget, `ScatterPlot: Connector not initialized`, { widgetId: widget.id });
+      return;
+    }
     setLoading(true);
+    logger.debug(LogCategories.Widget, `ScatterPlot: Loading data`, { 
+      widgetId: widget.id, 
+      table: widget.data.table,
+      x: widget.visual.x?.field,
+      y: widget.visual.y?.field
+    });
     try {
       const result = await mosaicConnector.query(
         `SELECT "${widget.visual.x?.field}", "${widget.visual.y?.field}" 
@@ -67,8 +77,9 @@ function ScatterPlotWidget({ widget }: { widget: WidgetSpec }) {
          LIMIT 1000`
       );
       setData(result as Record<string, unknown>[]);
+      logger.debug(LogCategories.Widget, `ScatterPlot: Data loaded`, { widgetId: widget.id, rows: result.length });
     } catch (err) {
-      console.error('Failed to load scatter data:', err);
+      logger.error(LogCategories.Widget, `ScatterPlot: Failed to load data`, err, { widgetId: widget.id });
     } finally {
       setLoading(false);
     }
@@ -148,8 +159,17 @@ function BarChartWidget({ widget }: { widget: WidgetSpec }) {
   }, [widget.data.table, widget.visual.x?.field, widget.visual.y?.field]);
 
   const loadData = async () => {
-    if (!mosaicConnector.isInitialized()) return;
+    if (!mosaicConnector.isInitialized()) {
+      logger.warn(LogCategories.Widget, `BarChart: Connector not initialized`, { widgetId: widget.id });
+      return;
+    }
     setLoading(true);
+    logger.debug(LogCategories.Widget, `BarChart: Loading data`, { 
+      widgetId: widget.id, 
+      table: widget.data.table,
+      x: widget.visual.x?.field,
+      y: widget.visual.y?.field
+    });
     try {
       const yField = widget.visual.y?.field;
       const xField = widget.visual.x?.field;
@@ -171,8 +191,9 @@ function BarChartWidget({ widget }: { widget: WidgetSpec }) {
       
       const result = await mosaicConnector.query(query);
       setData(result as Record<string, unknown>[]);
+      logger.debug(LogCategories.Widget, `BarChart: Data loaded`, { widgetId: widget.id, rows: result.length });
     } catch (err) {
-      console.error('Failed to load bar data:', err);
+      logger.error(LogCategories.Widget, `BarChart: Failed to load data`, err, { widgetId: widget.id });
     } finally {
       setLoading(false);
     }
@@ -246,8 +267,17 @@ function LineChartWidget({ widget }: { widget: WidgetSpec }) {
   }, [widget.data.table, widget.visual.x?.field, widget.visual.y?.field]);
 
   const loadData = async () => {
-    if (!mosaicConnector.isInitialized()) return;
+    if (!mosaicConnector.isInitialized()) {
+      logger.warn(LogCategories.Widget, `LineChart: Connector not initialized`, { widgetId: widget.id });
+      return;
+    }
     setLoading(true);
+    logger.debug(LogCategories.Widget, `LineChart: Loading data`, { 
+      widgetId: widget.id, 
+      table: widget.data.table,
+      x: widget.visual.x?.field,
+      y: widget.visual.y?.field
+    });
     try {
       const result = await mosaicConnector.query(
         `SELECT "${widget.visual.x?.field}" as x, "${widget.visual.y?.field}" as y 
@@ -256,8 +286,9 @@ function LineChartWidget({ widget }: { widget: WidgetSpec }) {
          LIMIT 100`
       );
       setData(result as Record<string, unknown>[]);
+      logger.debug(LogCategories.Widget, `LineChart: Data loaded`, { widgetId: widget.id, rows: result.length });
     } catch (err) {
-      console.error('Failed to load line data:', err);
+      logger.error(LogCategories.Widget, `LineChart: Failed to load data`, err, { widgetId: widget.id });
     } finally {
       setLoading(false);
     }
@@ -335,16 +366,21 @@ function TableWidget({ widget }: { widget: WidgetSpec }) {
   }, [widget.data.table]);
 
   const loadData = async () => {
-    if (!mosaicConnector.isInitialized()) return;
+    if (!mosaicConnector.isInitialized()) {
+      logger.warn(LogCategories.Widget, `Table: Connector not initialized`, { widgetId: widget.id });
+      return;
+    }
     setLoading(true);
+    logger.debug(LogCategories.Widget, `Table: Loading data`, { widgetId: widget.id, table: widget.data.table });
     try {
       const result = await mosaicConnector.getTablePreview(widget.data.table!, 50);
       setData(result);
       if (result.length > 0) {
         setColumns(Object.keys(result[0]));
       }
+      logger.debug(LogCategories.Widget, `Table: Data loaded`, { widgetId: widget.id, rows: result.length, columns: result.length > 0 ? Object.keys(result[0]).length : 0 });
     } catch (err) {
-      console.error('Failed to load table data:', err);
+      logger.error(LogCategories.Widget, `Table: Failed to load data`, err, { widgetId: widget.id });
     } finally {
       setLoading(false);
     }
@@ -408,8 +444,17 @@ function MetricWidget({ widget }: { widget: WidgetSpec }) {
   }, [widget.data.table, widget.visual.y?.field]);
 
   const loadData = async () => {
-    if (!mosaicConnector.isInitialized()) return;
+    if (!mosaicConnector.isInitialized()) {
+      logger.warn(LogCategories.Widget, `Metric: Connector not initialized`, { widgetId: widget.id });
+      return;
+    }
     setLoading(true);
+    logger.debug(LogCategories.Widget, `Metric: Loading data`, { 
+      widgetId: widget.id, 
+      table: widget.data.table,
+      field: widget.visual.y?.field,
+      aggregate: widget.visual.y?.aggregate
+    });
     try {
       const aggregate = widget.visual.y?.aggregate || 'count';
       const field = widget.visual.y?.field;
@@ -423,8 +468,9 @@ function MetricWidget({ widget }: { widget: WidgetSpec }) {
       
       const result = await mosaicConnector.query<{ value: number }>(query);
       setValue(result[0]?.value ?? '--');
+      logger.debug(LogCategories.Widget, `Metric: Value loaded`, { widgetId: widget.id, value: result[0]?.value });
     } catch (err) {
-      console.error('Failed to load metric:', err);
+      logger.error(LogCategories.Widget, `Metric: Failed to load data`, err, { widgetId: widget.id });
     } finally {
       setLoading(false);
     }

@@ -1,5 +1,6 @@
 import { coordinator, wasmConnector } from '@uwdata/vgplot';
 import type { DataSourceType, TableInfo, ColumnInfo } from '@/types';
+import { logger, LogCategories } from '@/core/logger';
 
 export interface MosaicConnectorOptions {
   type: DataSourceType;
@@ -14,173 +15,270 @@ class MosaicConnectorService {
 
   async initialize(options: MosaicConnectorOptions = { type: 'wasm' }): Promise<void> {
     if (this.initialized) {
+      logger.debug(LogCategories.Mosaic, 'Connector already initialized, skipping');
       return;
     }
 
-    const mc = coordinator();
-    
-    switch (options.type) {
-      case 'wasm':
-        this.connector = wasmConnector();
-        mc.databaseConnector(this.connector);
-        break;
-      case 'socket':
-        console.warn('Socket connector not yet implemented, falling back to WASM');
-        this.connector = wasmConnector();
-        mc.databaseConnector(this.connector);
-        break;
-      case 'rest':
-        console.warn('REST connector not yet implemented, falling back to WASM');
-        this.connector = wasmConnector();
-        mc.databaseConnector(this.connector);
-        break;
-      default:
-        this.connector = wasmConnector();
-        mc.databaseConnector(this.connector);
-    }
+    const endTimer = logger.time(LogCategories.Mosaic, 'Initialize connector');
+    logger.info(LogCategories.Mosaic, `Initializing connector with type: ${options.type}`, options);
 
-    this.connectorType = options.type;
-    this.initialized = true;
+    try {
+      const mc = coordinator();
+      
+      switch (options.type) {
+        case 'wasm':
+          logger.debug(LogCategories.Mosaic, 'Creating WASM connector');
+          this.connector = wasmConnector();
+          mc.databaseConnector(this.connector);
+          break;
+        case 'socket':
+          logger.warn(LogCategories.Mosaic, 'Socket connector not yet implemented, falling back to WASM');
+          this.connector = wasmConnector();
+          mc.databaseConnector(this.connector);
+          break;
+        case 'rest':
+          logger.warn(LogCategories.Mosaic, 'REST connector not yet implemented, falling back to WASM');
+          this.connector = wasmConnector();
+          mc.databaseConnector(this.connector);
+          break;
+        default:
+          logger.warn(LogCategories.Mosaic, `Unknown connector type: ${options.type}, falling back to WASM`);
+          this.connector = wasmConnector();
+          mc.databaseConnector(this.connector);
+      }
+
+      this.connectorType = options.type;
+      this.initialized = true;
+      logger.info(LogCategories.Mosaic, 'Connector initialized successfully', { type: this.connectorType });
+      endTimer();
+    } catch (err) {
+      logger.error(LogCategories.Mosaic, 'Failed to initialize connector', err);
+      throw err;
+    }
   }
 
   async exec(query: string): Promise<void> {
     await this.ensureInitialized();
-    const mc = coordinator();
-    await mc.exec(query);
+    const start = performance.now();
+    logger.debug(LogCategories.Query, `Executing: ${query.slice(0, 100)}${query.length > 100 ? '...' : ''}`);
+    
+    try {
+      const mc = coordinator();
+      await mc.exec(query);
+      const duration = performance.now() - start;
+      logger.debug(LogCategories.Query, `Exec completed`, { duration: `${duration.toFixed(2)}ms` });
+    } catch (err) {
+      logger.error(LogCategories.Query, `Exec failed: ${query.slice(0, 100)}`, err);
+      throw err;
+    }
   }
 
   async query<T = unknown>(sql: string): Promise<T[]> {
     await this.ensureInitialized();
-    const mc = coordinator();
-    const result = await mc.query(sql, { type: 'json' });
-    return result as T[];
+    const start = performance.now();
+    logger.debug(LogCategories.Query, `Query: ${sql.slice(0, 150)}${sql.length > 150 ? '...' : ''}`);
+    
+    try {
+      const mc = coordinator();
+      const result = await mc.query(sql, { type: 'json' });
+      const duration = performance.now() - start;
+      const rowCount = Array.isArray(result) ? result.length : 0;
+      logger.debug(LogCategories.Query, `Query completed`, { duration: `${duration.toFixed(2)}ms`, rows: rowCount });
+      return result as T[];
+    } catch (err) {
+      logger.error(LogCategories.Query, `Query failed: ${sql.slice(0, 100)}`, err);
+      throw err;
+    }
   }
 
   async loadCSVFromText(tableName: string, csvText: string): Promise<void> {
     await this.ensureInitialized();
-    // Parse CSV and create table
-    const lines = csvText.trim().split('\n');
-    if (lines.length < 2) throw new Error('CSV must have header and at least one row');
+    const endTimer = logger.time(LogCategories.DataSource, `Load CSV text into table "${tableName}"`);
     
-    const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
-    const rows = lines.slice(1).map(line => {
-      const values = line.split(',').map(v => v.trim());
-      return values;
-    });
-
-    // Create table with inferred types
-    const sampleRow = rows[0];
-    const columnDefs = headers.map((h, i) => {
-      const val = sampleRow[i];
-      let type = 'VARCHAR';
-      if (!isNaN(Number(val)) && val !== '') {
-        type = val.includes('.') ? 'DOUBLE' : 'INTEGER';
+    try {
+      // Parse CSV and create table
+      const lines = csvText.trim().split('\n');
+      if (lines.length < 2) {
+        const err = new Error('CSV must have header and at least one row');
+        logger.error(LogCategories.DataSource, 'Invalid CSV format', err);
+        throw err;
       }
-      return `"${h}" ${type}`;
-    }).join(', ');
-
-    await this.exec(`DROP TABLE IF EXISTS "${tableName}"`);
-    await this.exec(`CREATE TABLE "${tableName}" (${columnDefs})`);
-
-    // Insert data in batches
-    const batchSize = 100;
-    for (let i = 0; i < rows.length; i += batchSize) {
-      const batch = rows.slice(i, i + batchSize);
-      const values = batch.map(row => {
-        const vals = row.map((v, idx) => {
-          const header = headers[idx];
-          const colDef = columnDefs.split(',')[idx];
-          if (colDef?.includes('INTEGER') || colDef?.includes('DOUBLE')) {
-            return v === '' ? 'NULL' : v;
-          }
-          return `'${v.replace(/'/g, "''")}'`;
-        }).join(', ');
-        return `(${vals})`;
-      }).join(', ');
       
-      await this.exec(`INSERT INTO "${tableName}" VALUES ${values}`);
+      const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
+      const rows = lines.slice(1).map(line => {
+        const values = line.split(',').map(v => v.trim());
+        return values;
+      });
+
+      logger.info(LogCategories.DataSource, `Parsing CSV: ${headers.length} columns, ${rows.length} rows`, { headers });
+
+      // Create table with inferred types
+      const sampleRow = rows[0];
+      const columnDefs = headers.map((h, i) => {
+        const val = sampleRow[i];
+        let type = 'VARCHAR';
+        if (!isNaN(Number(val)) && val !== '') {
+          type = val.includes('.') ? 'DOUBLE' : 'INTEGER';
+        }
+        return `"${h}" ${type}`;
+      }).join(', ');
+
+      await this.exec(`DROP TABLE IF EXISTS "${tableName}"`);
+      await this.exec(`CREATE TABLE "${tableName}" (${columnDefs})`);
+
+      // Insert data in batches
+      const batchSize = 100;
+      for (let i = 0; i < rows.length; i += batchSize) {
+        const batch = rows.slice(i, i + batchSize);
+        const values = batch.map(row => {
+          const vals = row.map((v, idx) => {
+            const colDef = columnDefs.split(',')[idx];
+            if (colDef?.includes('INTEGER') || colDef?.includes('DOUBLE')) {
+              return v === '' ? 'NULL' : v;
+            }
+            return `'${v.replace(/'/g, "''")}'`;
+          }).join(', ');
+          return `(${vals})`;
+        }).join(', ');
+        
+        await this.exec(`INSERT INTO "${tableName}" VALUES ${values}`);
+      }
+      
+      logger.info(LogCategories.DataSource, `Table "${tableName}" created successfully`, { rows: rows.length });
+      endTimer();
+    } catch (err) {
+      logger.error(LogCategories.DataSource, `Failed to load CSV into table "${tableName}"`, err);
+      throw err;
     }
   }
 
   async loadCSV(tableName: string, url: string): Promise<void> {
     await this.ensureInitialized();
+    logger.info(LogCategories.DataSource, `Loading CSV from URL into table "${tableName}"`, { url: url.slice(0, 100) });
     
     // For blob URLs (local files), use DuckDB's read_csv
     if (url.startsWith('blob:')) {
+      logger.debug(LogCategories.DataSource, 'Using DuckDB read_csv for blob URL');
       const query = `CREATE TABLE IF NOT EXISTS "${tableName}" AS SELECT * FROM read_csv('${url}', auto_detect=true, sample_size=-1)`;
       await this.exec(query);
+      logger.info(LogCategories.DataSource, `Table "${tableName}" created from blob URL`);
       return;
     }
     
     // For remote URLs, fetch and parse manually
     try {
+      logger.debug(LogCategories.DataSource, `Fetching CSV from remote URL: ${url}`);
       const response = await fetch(url);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok) {
+        const err = new Error(`HTTP ${response.status}`);
+        logger.error(LogCategories.DataSource, `Failed to fetch CSV: HTTP ${response.status}`, err);
+        throw err;
+      }
       const text = await response.text();
+      logger.debug(LogCategories.DataSource, `Fetched ${text.length} bytes`);
       await this.loadCSVFromText(tableName, text);
     } catch (err) {
-      console.error('Failed to fetch CSV:', err);
+      logger.error(LogCategories.DataSource, `Failed to load CSV from ${url}`, err);
       throw new Error(`Failed to load CSV from ${url}: ${err}`);
     }
   }
 
   async loadParquet(tableName: string, url: string): Promise<void> {
     await this.ensureInitialized();
-    const query = `CREATE TABLE IF NOT EXISTS "${tableName}" AS SELECT * FROM read_parquet('${url}')`;
-    await this.exec(query);
+    logger.info(LogCategories.DataSource, `Loading Parquet into table "${tableName}"`, { url });
+    
+    try {
+      const query = `CREATE TABLE IF NOT EXISTS "${tableName}" AS SELECT * FROM read_parquet('${url}')`;
+      await this.exec(query);
+      logger.info(LogCategories.DataSource, `Table "${tableName}" created from Parquet`);
+    } catch (err) {
+      logger.error(LogCategories.DataSource, `Failed to load Parquet into "${tableName}"`, err);
+      throw err;
+    }
   }
 
   async loadJSON(tableName: string, url: string): Promise<void> {
     await this.ensureInitialized();
-    const query = `CREATE TABLE IF NOT EXISTS "${tableName}" AS SELECT * FROM read_json('${url}', auto_detect=true)`;
-    await this.exec(query);
+    logger.info(LogCategories.DataSource, `Loading JSON into table "${tableName}"`, { url });
+    
+    try {
+      const query = `CREATE TABLE IF NOT EXISTS "${tableName}" AS SELECT * FROM read_json('${url}', auto_detect=true)`;
+      await this.exec(query);
+      logger.info(LogCategories.DataSource, `Table "${tableName}" created from JSON`);
+    } catch (err) {
+      logger.error(LogCategories.DataSource, `Failed to load JSON into "${tableName}"`, err);
+      throw err;
+    }
   }
 
   async getTables(): Promise<string[]> {
     await this.ensureInitialized();
+    logger.debug(LogCategories.DataSource, 'Getting list of tables');
+    
     const result = await this.query<{ name: string }>(`
       SELECT table_name as name 
       FROM information_schema.tables 
       WHERE table_schema = 'main'
     `);
-    return result.map((r) => r.name);
+    
+    const tables = result.map((r) => r.name);
+    logger.debug(LogCategories.DataSource, `Found ${tables.length} tables`, { tables });
+    return tables;
   }
 
   async getTableInfo(tableName: string): Promise<TableInfo> {
     await this.ensureInitialized();
+    logger.debug(LogCategories.DataSource, `Getting info for table "${tableName}"`);
     
-    const columns = await this.query<{ column_name: string; data_type: string; is_nullable: string }>(`
-      SELECT column_name, data_type, is_nullable
-      FROM information_schema.columns
-      WHERE table_name = '${tableName}'
-      ORDER BY ordinal_position
-    `);
+    try {
+      const columns = await this.query<{ column_name: string; data_type: string; is_nullable: string }>(`
+        SELECT column_name, data_type, is_nullable
+        FROM information_schema.columns
+        WHERE table_name = '${tableName}'
+        ORDER BY ordinal_position
+      `);
 
-    const countResult = await this.query<{ count: number }>(`
-      SELECT COUNT(*) as count FROM "${tableName}"
-    `);
+      const countResult = await this.query<{ count: number }>(`
+        SELECT COUNT(*) as count FROM "${tableName}"
+      `);
 
-    const columnInfos: ColumnInfo[] = columns.map((col) => ({
-      name: col.column_name,
-      type: col.data_type,
-      nullable: col.is_nullable === 'YES',
-    }));
+      const columnInfos: ColumnInfo[] = columns.map((col) => ({
+        name: col.column_name,
+        type: col.data_type,
+        nullable: col.is_nullable === 'YES',
+      }));
 
-    return {
-      name: tableName,
-      columns: columnInfos,
-      rowCount: countResult[0]?.count ?? 0,
-    };
+      const info: TableInfo = {
+        name: tableName,
+        columns: columnInfos,
+        rowCount: countResult[0]?.count ?? 0,
+      };
+      
+      logger.debug(LogCategories.DataSource, `Table "${tableName}" info`, { columns: columnInfos.length, rows: info.rowCount });
+      return info;
+    } catch (err) {
+      logger.error(LogCategories.DataSource, `Failed to get info for table "${tableName}"`, err);
+      throw err;
+    }
   }
 
   async getTablePreview(tableName: string, limit = 100): Promise<Record<string, unknown>[]> {
     await this.ensureInitialized();
+    logger.debug(LogCategories.DataSource, `Getting preview for table "${tableName}"`, { limit });
     return this.query(`SELECT * FROM "${tableName}" LIMIT ${limit}`);
   }
 
   async dropTable(tableName: string): Promise<void> {
     await this.ensureInitialized();
-    await this.exec(`DROP TABLE IF EXISTS "${tableName}"`);
+    logger.info(LogCategories.DataSource, `Dropping table "${tableName}"`);
+    
+    try {
+      await this.exec(`DROP TABLE IF EXISTS "${tableName}"`);
+      logger.info(LogCategories.DataSource, `Table "${tableName}" dropped`);
+    } catch (err) {
+      logger.error(LogCategories.DataSource, `Failed to drop table "${tableName}"`, err);
+      throw err;
+    }
   }
 
   getCoordinator() {

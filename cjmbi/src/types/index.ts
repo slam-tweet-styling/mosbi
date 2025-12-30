@@ -169,7 +169,7 @@ export interface UIState {
   bottomPanelOpen: boolean;
   leftPanelTab: 'data' | 'widgets';
   rightPanelTab: 'properties' | 'links' | 'style';
-  bottomPanelTab: 'queries' | 'data' | 'performance';
+  bottomPanelTab: 'logs' | 'queries' | 'data' | 'performance';
   zoom: number;
 }
 
