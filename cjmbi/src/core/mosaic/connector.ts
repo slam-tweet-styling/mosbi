@@ -156,18 +156,10 @@ class MosaicConnectorService {
     await this.ensureInitialized();
     logger.info(LogCategories.DataSource, `Loading CSV from URL into table "${tableName}"`, { url: url.slice(0, 100) });
     
-    // For blob URLs (local files), use DuckDB's read_csv
-    if (url.startsWith('blob:')) {
-      logger.debug(LogCategories.DataSource, 'Using DuckDB read_csv for blob URL');
-      const query = `CREATE TABLE IF NOT EXISTS "${tableName}" AS SELECT * FROM read_csv('${url}', auto_detect=true, sample_size=-1)`;
-      await this.exec(query);
-      logger.info(LogCategories.DataSource, `Table "${tableName}" created from blob URL`);
-      return;
-    }
-    
-    // For remote URLs, fetch and parse manually
+    // For all URLs (including blob:), fetch content and parse manually
+    // DuckDB WASM cannot directly read blob URLs or most remote URLs
     try {
-      logger.debug(LogCategories.DataSource, `Fetching CSV from remote URL: ${url}`);
+      logger.debug(LogCategories.DataSource, `Fetching CSV from URL: ${url.slice(0, 80)}`);
       const response = await fetch(url);
       if (!response.ok) {
         const err = new Error(`HTTP ${response.status}`);
@@ -178,8 +170,8 @@ class MosaicConnectorService {
       logger.debug(LogCategories.DataSource, `Fetched ${text.length} bytes`);
       await this.loadCSVFromText(tableName, text);
     } catch (err) {
-      logger.error(LogCategories.DataSource, `Failed to load CSV from ${url}`, err);
-      throw new Error(`Failed to load CSV from ${url}: ${err}`);
+      logger.error(LogCategories.DataSource, `Failed to load CSV from ${url.slice(0, 80)}`, err);
+      throw new Error(`Failed to load CSV: ${err instanceof Error ? err.message : err}`);
     }
   }
 
