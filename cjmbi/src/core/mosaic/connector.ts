@@ -96,7 +96,32 @@ class MosaicConnectorService {
     const endTimer = logger.time(LogCategories.DataSource, `Load CSV text into table "${tableName}"`);
     
     try {
-      // Parse CSV and create table
+      // Parse CSV properly handling quoted values
+      const parseCSVLine = (line: string): string[] => {
+        const result: string[] = [];
+        let current = '';
+        let inQuotes = false;
+        
+        for (let i = 0; i < line.length; i++) {
+          const char = line[i];
+          if (char === '"') {
+            if (inQuotes && line[i + 1] === '"') {
+              current += '"';
+              i++;
+            } else {
+              inQuotes = !inQuotes;
+            }
+          } else if (char === ',' && !inQuotes) {
+            result.push(current.trim());
+            current = '';
+          } else {
+            current += char;
+          }
+        }
+        result.push(current.trim());
+        return result;
+      };
+
       const lines = csvText.trim().split('\n');
       if (lines.length < 2) {
         const err = new Error('CSV must have header and at least one row');
@@ -104,47 +129,81 @@ class MosaicConnectorService {
         throw err;
       }
       
-      const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
-      const rows = lines.slice(1).map(line => {
-        const values = line.split(',').map(v => v.trim());
-        return values;
+      const headers = parseCSVLine(lines[0]).map(h => h.replace(/^"|"$/g, ''));
+      
+      // Sample first 100 rows to infer types
+      const sampleSize = Math.min(100, lines.length - 1);
+      const sampleRows: string[][] = [];
+      for (let i = 1; i <= sampleSize; i++) {
+        sampleRows.push(parseCSVLine(lines[i]));
+      }
+
+      logger.info(LogCategories.DataSource, `Parsing CSV: ${headers.length} columns, ${lines.length - 1} rows`, { headers });
+
+      // Infer column types from sample
+      const columnTypes = headers.map((_, colIdx) => {
+        let hasDouble = false;
+        let allNumeric = true;
+        
+        for (const row of sampleRows) {
+          const val = row[colIdx]?.replace(/^"|"$/g, '') ?? '';
+          if (val === '') continue;
+          
+          const num = Number(val);
+          if (isNaN(num)) {
+            allNumeric = false;
+            break;
+          }
+          if (val.includes('.')) {
+            hasDouble = true;
+          }
+        }
+        
+        if (allNumeric) {
+          return hasDouble ? 'DOUBLE' : 'BIGINT';
+        }
+        return 'VARCHAR';
       });
 
-      logger.info(LogCategories.DataSource, `Parsing CSV: ${headers.length} columns, ${rows.length} rows`, { headers });
-
-      // Create table with inferred types
-      const sampleRow = rows[0];
-      const columnDefs = headers.map((h, i) => {
-        const val = sampleRow[i];
-        let type = 'VARCHAR';
-        if (!isNaN(Number(val)) && val !== '') {
-          type = val.includes('.') ? 'DOUBLE' : 'INTEGER';
-        }
-        return `"${h}" ${type}`;
-      }).join(', ');
+      const columnDefs = headers.map((h, i) => `"${h}" ${columnTypes[i]}`).join(', ');
 
       await this.exec(`DROP TABLE IF EXISTS "${tableName}"`);
       await this.exec(`CREATE TABLE "${tableName}" (${columnDefs})`);
 
       // Insert data in batches
-      const batchSize = 100;
-      for (let i = 0; i < rows.length; i += batchSize) {
-        const batch = rows.slice(i, i + batchSize);
-        const values = batch.map(row => {
-          const vals = row.map((v, idx) => {
-            const colDef = columnDefs.split(',')[idx];
-            if (colDef?.includes('INTEGER') || colDef?.includes('DOUBLE')) {
-              return v === '' ? 'NULL' : v;
-            }
-            return `'${v.replace(/'/g, "''")}'`;
-          }).join(', ');
-          return `(${vals})`;
-        }).join(', ');
+      const batchSize = 1000;
+      const totalRows = lines.length - 1;
+      
+      for (let i = 1; i <= totalRows; i += batchSize) {
+        const batchEnd = Math.min(i + batchSize, totalRows + 1);
+        const valueStrings: string[] = [];
         
-        await this.exec(`INSERT INTO "${tableName}" VALUES ${values}`);
+        for (let j = i; j < batchEnd; j++) {
+          const row = parseCSVLine(lines[j]);
+          const vals = row.map((v, idx) => {
+            const cleanVal = v.replace(/^"|"$/g, '');
+            const colType = columnTypes[idx];
+            
+            if (colType === 'BIGINT' || colType === 'DOUBLE') {
+              return cleanVal === '' ? 'NULL' : cleanVal;
+            }
+            // Escape single quotes for VARCHAR
+            return `'${cleanVal.replace(/'/g, "''")}'`;
+          }).join(', ');
+          valueStrings.push(`(${vals})`);
+        }
+        
+        if (valueStrings.length > 0) {
+          await this.exec(`INSERT INTO "${tableName}" VALUES ${valueStrings.join(', ')}`);
+        }
+        
+        // Log progress for large files
+        if (totalRows > 10000 && (i - 1) % 50000 === 0) {
+          logger.debug(LogCategories.DataSource, `Inserted ${Math.min(i + batchSize - 1, totalRows)} / ${totalRows} rows`);
+        }
       }
       
-      logger.info(LogCategories.DataSource, `Table "${tableName}" created successfully`, { rows: rows.length });
+      logger.info(LogCategories.DataSource, `Table "${tableName}" created successfully`, { rows: totalRows });
       endTimer();
     } catch (err) {
       logger.error(LogCategories.DataSource, `Failed to load CSV into table "${tableName}"`, err);
